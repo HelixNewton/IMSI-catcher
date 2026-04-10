@@ -229,7 +229,5 @@ Frequency : http://www.worldtimezone.com/gsm.html and https://fr.wikipedia.org/w
 Mobile Network Code : https://en.wikipedia.org/wiki/Mobile_Network_Code  
 Scapy : http://secdev.org/projects/scapy/doc/usage.html  
 IMSI : https://fr.wikipedia.org/wiki/IMSI  
-Realtek RTL2832U : https://osmocom.org/projects/sdr/wiki/rtl-sdr and http://doc.ubuntu-fr.org/rtl2832u and http://doc.ubuntu-fr.org/rtl-sdr  
-<<<<<<< HEAD
+Realtek RTL2832U : https://osmocom.org/projects/sdr/wiki/rtl-sdr and http://doc.ubuntu-fr.org/rtl2832u and http://doc.ubuntu-fr.org/rtl-sdr
 
-=======
