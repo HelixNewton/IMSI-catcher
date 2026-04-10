@@ -79,9 +79,13 @@ Options:
                         (require root/suid access)
   -w SQLITE, --sqlite=SQLITE
                         Save observed IMSI values to specified SQLite file
-  -t TXT, --txt=TXT     Save observed IMSI values to specified TXT file
+  -t TXT, --txt=TXT     Save observed IMSI values to specified CSV file
   -z, --mysql           Save observed IMSI values to specified MYSQL DB (copy
                         .env.dist to .env and edit it)
+  -f FORMAT, --format=FORMAT
+                        Output format: table, csv, or json (default: table)
+  --show-meta           Show packet metadata columns such as ARFCN, timeslot,
+                        signal level, SNR, frame number, and cell state
 ```
 
 Open 2 terminals.  
@@ -95,6 +99,17 @@ In terminal 2
 ```bash
 grgsm_livemon
 ```
+To see more context per event in the terminal:
+```bash
+sudo python3 simple_IMSI-catcher.py -s --show-meta
+```
+
+To emit machine-readable output:
+```bash
+sudo python3 simple_IMSI-catcher.py -s --format csv
+sudo python3 simple_IMSI-catcher.py -s --format json
+```
+
 Now, change the frequency until it display, in terminal, something like that :  
 ``` 
 15 06 21 00 01 f0 2b 2b 2b 2b 2b 2b 2b 2b 2b 2b 2b 2b 2b 2b 2b 2b 2b
@@ -109,6 +124,38 @@ You can watch GSM packets with wireshark.
 sudo apt install wireshark
 sudo wireshark -k -Y '!icmp && gsmtap' -i lo
 ```
+
+### Web UI
+
+There is also a web dashboard for live capture, filtering, analysis and export:
+
+```bash
+python3 webui.py
+```
+
+Then open:
+
+```text
+http://127.0.0.1:8080
+```
+
+The web UI supports:
+
+- starting and stopping capture in UDP listener mode or sniff mode
+- choosing interface and port
+- tracking a specific IMSI prefix
+- showing unresolved TMSI entries
+- optional SQLite, CSV and MySQL persistence
+- live session metrics and current cell/operator display
+- filtering by free text, operator, message type, cell state and ARFCN
+- summary panels for top operators, countries, message types and cells
+- an Events view for raw observations
+- a Devices view that groups repeated sightings of the same IMSI or TMSI
+- exporting the filtered in-memory session to JSON or CSV
+
+The dashboard refreshes automatically and is intended to be used alongside `grgsm_livemon` or any other source sending decoded GSMTAP traffic to the configured port.
+
+If you use sniff mode from the browser, the `webui.py` process still needs the same privileges that terminal sniff mode requires.
 
 ### Find frequencies
  

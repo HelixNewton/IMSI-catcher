@@ -21,30 +21,18 @@ This program shows you IMSI numbers of cellphones around you.
 """
 
 import ctypes
+import csv
 import json
 from optparse import OptionParser
 import datetime
 import io
+import sys
 import socket
 
 imsitracker = None
 
 
 class tracker:
-    imsistate = {}
-    # phones
-    imsis = []  # [IMSI,...]
-    tmsis = {}  # {TMSI:IMSI,...}
-    nb_IMSI = 0  # count the number of IMSI
-
-    mcc = ""
-    mnc = ""
-    lac = ""
-    cell = ""
-    country = ""
-    brand = ""
-    operator = ""
-
     # in minutes
     purgeTimer = 10  # default 10 min
 
@@ -55,8 +43,36 @@ class tracker:
     mysql_cur = None
     textfilePath = None
     output_function = None
+    output_format = "table"
+    show_meta = False
+    csv_writer = None
+    csv_file = None
+    cell_arfcn = None
+    cell_last_seen = None
 
     def __init__(self):
+        self.imsistate = {}
+        self.imsis = []
+        self.tmsis = {}
+        self.nb_IMSI = 0
+        self.mcc = ""
+        self.mnc = ""
+        self.lac = ""
+        self.cell = ""
+        self.country = ""
+        self.brand = ""
+        self.operator = ""
+        self.show_all_tmsi = False
+        self.sqlite_con = None
+        self.mysql_con = None
+        self.mysql_cur = None
+        self.textfilePath = None
+        self.output_format = "table"
+        self.show_meta = False
+        self.csv_writer = None
+        self.csv_file = None
+        self.cell_arfcn = None
+        self.cell_last_seen = None
         self.load_mcc_codes()
         self.track_this_imsi("")
         self.output_function = self.output
@@ -65,6 +81,16 @@ class tracker:
         # New output function need this field :
         # cpt, tmsi1, tmsi2, imsi, imsicountry, imsibrand, imsioperator, mcc, mnc, lac, cell, timestamp, packet=None
         self.output_function = new_output_function
+
+    def set_output_format(self, output_format, show_meta=False):
+        self.output_format = output_format
+        self.show_meta = show_meta
+        if output_format == "json":
+            self.output_function = self.output_json
+        elif output_format == "csv":
+            self.output_function = self.output_csv
+        else:
+            self.output_function = self.output
 
     def track_this_imsi(self, imsi_to_track):
         self.imsi_to_track = imsi_to_track
@@ -132,7 +158,7 @@ class tracker:
         with io.open('mcc-mnc/mcc_codes.json', 'r', encoding='utf8') as file:
             self.mcc_codes = json.load(file)
 
-    def current_cell(self, mcc, mnc, lac, cell):
+    def current_cell(self, mcc, mnc, lac, cell, arfcn=None):
         brand = ""
         operator = ""
         country = ""
@@ -149,19 +175,97 @@ class tracker:
         self.country = country
         self.brand = brand
         self.operator = operator
+        self.cell_arfcn = str(arfcn) if arfcn is not None else None
+        self.cell_last_seen = datetime.datetime.utcnow().replace(microsecond=0)
+
+    def cell_context_for_event(self, arfcn):
+        empty_context = {
+            "mcc": "",
+            "mnc": "",
+            "lac": "",
+            "cell": "",
+            "country": "",
+            "brand": "",
+            "operator": "",
+            "cell_status": "unknown",
+        }
+
+        if self.cell_arfcn is None or self.cell_last_seen is None:
+            return empty_context
+
+        if arfcn is None or str(arfcn) != self.cell_arfcn:
+            context = empty_context.copy()
+            context["cell_status"] = "stale"
+            return context
+
+        context = {
+            "mcc": str(self.mcc),
+            "mnc": str(self.mnc),
+            "lac": str(self.lac),
+            "cell": str(self.cell),
+            "country": self.country,
+            "brand": self.brand,
+            "operator": self.operator,
+            "cell_status": "current",
+        }
+        return context
 
     def sqlite_file(self, filename):
         import sqlite3  # Avoid pulling in sqlite3 when not saving
         print("Saving to SQLite database in %s" % filename)
         self.sqlite_con = sqlite3.connect(filename)
         self.sqlite_con.text_factory = str
-        # FIXME Figure out proper SQL type for each attribute
-        self.sqlite_con.execute("CREATE TABLE IF NOT EXISTS observations(stamp datetime, tmsi1 text, tmsi2 text, imsi text, imsicountry text, imsibrand text, imsioperator text, mcc integer, mnc integer, lac integer, cell integer);")
+        self.sqlite_con.execute(
+            "CREATE TABLE IF NOT EXISTS observations("
+            "stamp datetime, "
+            "tmsi1 text, "
+            "tmsi2 text, "
+            "imsi text, "
+            "imsicountry text, "
+            "imsibrand text, "
+            "imsioperator text, "
+            "mcc integer, "
+            "mnc integer, "
+            "lac integer, "
+            "cell integer, "
+            "arfcn integer, "
+            "timeslot integer, "
+            "sub_slot integer, "
+            "signal_dbm integer, "
+            "snr_db integer, "
+            "frame_number integer, "
+            "channel_type integer, "
+            "message_type text, "
+            "cell_status text"
+            ");"
+        )
 
     def text_file(self, filename):
-        txt = open(filename, "w")
-        txt.write("stamp, tmsi1, tmsi2, imsi, imsicountry, imsibrand, imsioperator, mcc, mnc, lac, cell\n")
-        txt.close()
+        txt = open(filename, "w", newline="")
+        self.csv_file = txt
+        self.csv_writer = csv.writer(txt)
+        self.csv_writer.writerow([
+            "stamp",
+            "tmsi1",
+            "tmsi2",
+            "imsi",
+            "imsicountry",
+            "imsibrand",
+            "imsioperator",
+            "mcc",
+            "mnc",
+            "lac",
+            "cell",
+            "arfcn",
+            "timeslot",
+            "sub_slot",
+            "signal_dbm",
+            "snr_db",
+            "frame_number",
+            "channel_type",
+            "message_type",
+            "cell_status",
+        ])
         self.textfilePath = filename
 
     def mysql_file(self):
@@ -181,25 +285,166 @@ class tracker:
             print("create file .env first")
             exit()
 
-    def output(self, cpt, tmsi1, tmsi2, imsi, imsicountry, imsibrand, imsioperator, mcc, mnc, lac, cell, now, packet=None):
-        print(f"{str(cpt):7s} ; {tmsi1:10s} ; {tmsi2:10s} ; {imsi:17s} ; {imsicountry:16s} ; {imsibrand:14s} ; {imsioperator:21s} ; {str(mcc):4s} ; {str(mnc):5s} ; {str(lac):6s} ; {str(cell):6s} ; {now.isoformat():s}")
+    def close(self):
+        if self.csv_file:
+            self.csv_file.close()
+            self.csv_file = None
+            self.csv_writer = None
+        if self.sqlite_con:
+            self.sqlite_con.close()
+            self.sqlite_con = None
+        if self.mysql_cur:
+            self.mysql_cur.close()
+            self.mysql_cur = None
+        if self.mysql_con:
+            self.mysql_con.close()
+            self.mysql_con = None
 
-    def pfields(self, cpt, tmsi1, tmsi2, imsi, mcc, mnc, lac, cell, packet=None):
+    def build_record(self, cpt, tmsi1, tmsi2, imsi, imsicountry, imsibrand, imsioperator, mcc, mnc, lac, cell, now, meta=None):
+        meta = meta or {}
+        record = {
+            "count": str(cpt),
+            "tmsi1": tmsi1,
+            "tmsi2": tmsi2,
+            "imsi": imsi,
+            "imsicountry": imsicountry,
+            "imsibrand": imsibrand,
+            "imsioperator": imsioperator,
+            "mcc": str(mcc),
+            "mnc": str(mnc),
+            "lac": str(lac),
+            "cell": str(cell),
+            "timestamp": now.isoformat(),
+            "arfcn": str(meta.get("arfcn", "")),
+            "timeslot": str(meta.get("timeslot", "")),
+            "sub_slot": str(meta.get("sub_slot", "")),
+            "signal_dbm": str(meta.get("signal_dbm", "")),
+            "snr_db": str(meta.get("snr_db", "")),
+            "frame_number": str(meta.get("frame_number", "")),
+            "channel_type": str(meta.get("channel_type", "")),
+            "message_type": str(meta.get("message_type", "")),
+            "cell_status": str(meta.get("cell_status", "")),
+        }
+        return record
+
+    def output(self, cpt, tmsi1, tmsi2, imsi, imsicountry, imsibrand, imsioperator, mcc, mnc, lac, cell, now, packet=None, meta=None):
+        record = self.build_record(cpt, tmsi1, tmsi2, imsi, imsicountry, imsibrand, imsioperator, mcc, mnc, lac, cell, now, meta=meta)
+        fields = [
+            f"{record['count']:7s}",
+            f"{record['tmsi1']:10s}",
+            f"{record['tmsi2']:10s}",
+            f"{record['imsi']:17s}",
+            f"{record['imsicountry']:16s}",
+            f"{record['imsibrand']:14s}",
+            f"{record['imsioperator']:21s}",
+            f"{record['mcc']:4s}",
+            f"{record['mnc']:5s}",
+            f"{record['lac']:6s}",
+            f"{record['cell']:6s}",
+        ]
+        if self.show_meta:
+            fields.extend([
+                f"{record['arfcn']:5s}",
+                f"{record['timeslot']:2s}",
+                f"{record['sub_slot']:3s}",
+                f"{record['signal_dbm']:6s}",
+                f"{record['snr_db']:5s}",
+                f"{record['frame_number']:10s}",
+                f"{record['message_type']:14s}",
+                f"{record['cell_status']:10s}",
+            ])
+        fields.append(record["timestamp"])
+        print(" ; ".join(fields))
+
+    def output_json(self, cpt, tmsi1, tmsi2, imsi, imsicountry, imsibrand, imsioperator, mcc, mnc, lac, cell, now, packet=None, meta=None):
+        record = self.build_record(cpt, tmsi1, tmsi2, imsi, imsicountry, imsibrand, imsioperator, mcc, mnc, lac, cell, now, meta=meta)
+        print(json.dumps(record, ensure_ascii=False))
+
+    def output_csv(self, cpt, tmsi1, tmsi2, imsi, imsicountry, imsibrand, imsioperator, mcc, mnc, lac, cell, now, packet=None, meta=None):
+        record = self.build_record(cpt, tmsi1, tmsi2, imsi, imsicountry, imsibrand, imsioperator, mcc, mnc, lac, cell, now, meta=meta)
+        writer = csv.writer(sys.stdout)
+        columns = [
+            record["count"],
+            record["tmsi1"],
+            record["tmsi2"],
+            record["imsi"],
+            record["imsicountry"],
+            record["imsibrand"],
+            record["imsioperator"],
+            record["mcc"],
+            record["mnc"],
+            record["lac"],
+            record["cell"],
+            record["arfcn"],
+            record["timeslot"],
+            record["sub_slot"],
+            record["signal_dbm"],
+            record["snr_db"],
+            record["frame_number"],
+            record["channel_type"],
+            record["message_type"],
+            record["cell_status"],
+            record["timestamp"],
+        ]
+        writer.writerow(columns)
+
+    def pfields(self, cpt, tmsi1, tmsi2, imsi, arfcn, packet=None, meta=None):
         imsicountry = ""
         imsibrand = ""
         imsioperator = ""
+        context = self.cell_context_for_event(arfcn)
         if imsi:
             imsi, imsicountry, imsibrand, imsioperator = self.str_imsi(imsi, packet)
+        elif context["country"] or context["brand"] or context["operator"]:
+            imsicountry = context["country"]
+            imsibrand = context["brand"]
+            imsioperator = context["operator"]
         else:
             imsi = ""
         now = datetime.datetime.now()
-        self.output_function(cpt, tmsi1, tmsi2, imsi, imsicountry, imsibrand, imsioperator, mcc, mnc, lac, cell, now, packet)
+        meta = dict(meta or {})
+        meta["cell_status"] = context["cell_status"]
+        self.output_function(
+            cpt,
+            tmsi1,
+            tmsi2,
+            imsi,
+            imsicountry,
+            imsibrand,
+            imsioperator,
+            context["mcc"],
+            context["mnc"],
+            context["lac"],
+            context["cell"],
+            now,
+            packet,
+            meta,
+        )
 
         if self.textfilePath:
-            now = datetime.datetime.now()
-            txt = open(self.textfilePath, "a")
-            txt.write(f"{str(now)}, {tmsi1}, {tmsi2}, {imsi}, {imsicountry}, {imsibrand}, {imsioperator}, {mcc}, {mnc}, {lac}, {cell}\n")
-            txt.close()
+            self.csv_writer.writerow([
+                str(now),
+                tmsi1,
+                tmsi2,
+                imsi,
+                imsicountry,
+                imsibrand,
+                imsioperator,
+                context["mcc"],
+                context["mnc"],
+                context["lac"],
+                context["cell"],
+                meta.get("arfcn", ""),
+                meta.get("timeslot", ""),
+                meta.get("sub_slot", ""),
+                meta.get("signal_dbm", ""),
+                meta.get("snr_db", ""),
+                meta.get("frame_number", ""),
+                meta.get("channel_type", ""),
+                meta.get("message_type", ""),
+                meta.get("cell_status", ""),
+            ])
+            self.csv_file.flush()
 
         if tmsi1 == "":
             tmsi1 = None
@@ -208,8 +453,30 @@ class tracker:
 
         if self.sqlite_con:
             self.sqlite_con.execute(
-               u"INSERT INTO observations (stamp, tmsi1, tmsi2, imsi, imsicountry, imsibrand, imsioperator, mcc, mnc, lac, cell) " + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
-               (now, tmsi1, tmsi2, imsi, imsicountry, imsibrand, imsioperator, mcc, mnc, lac, cell)
+               u"INSERT INTO observations (stamp, tmsi1, tmsi2, imsi, imsicountry, imsibrand, imsioperator, mcc, mnc, lac, cell, arfcn, timeslot, sub_slot, signal_dbm, snr_db, frame_number, channel_type, message_type, cell_status) "
+               + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+               (
+                   now,
+                   tmsi1,
+                   tmsi2,
+                   imsi,
+                   imsicountry,
+                   imsibrand,
+                   imsioperator,
+                   context["mcc"],
+                   context["mnc"],
+                   context["lac"],
+                   context["cell"],
+                   meta.get("arfcn"),
+                   meta.get("timeslot"),
+                   meta.get("sub_slot"),
+                   meta.get("signal_dbm"),
+                   meta.get("snr_db"),
+                   meta.get("frame_number"),
+                   meta.get("channel_type"),
+                   meta.get("message_type"),
+                   meta.get("cell_status"),
+               )
             )
             self.sqlite_con.commit()
             pass
@@ -217,15 +484,90 @@ class tracker:
         if self.mysql_cur:
             print("saving data to db...")
             # Example query
-            query = ("INSERT INTO `imsi` (`tmsi1`, `tmsi2`, `imsi`,`mcc`, `mnc`, `lac`, `cell_id`, `stamp`, `deviceid`) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)")
-            arg = (tmsi1, tmsi2, imsi, mcc, mnc, lac, cell, now, "rtl")
+            query = (
+                "INSERT INTO `imsi` "
+                "(`tmsi1`, `tmsi2`, `imsi`, `mcc`, `mnc`, `lac`, `cell_id`, `stamp`, `deviceid`, `arfcn`, `timeslot`, `sub_slot`, `signal_dbm`, `snr_db`, `frame_number`, `channel_type`, `message_type`, `cell_status`) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+            )
+            arg = (
+                tmsi1,
+                tmsi2,
+                imsi,
+                context["mcc"],
+                context["mnc"],
+                context["lac"],
+                context["cell"],
+                now,
+                "rtl",
+                meta.get("arfcn"),
+                meta.get("timeslot"),
+                meta.get("sub_slot"),
+                meta.get("signal_dbm"),
+                meta.get("snr_db"),
+                meta.get("frame_number"),
+                meta.get("channel_type"),
+                meta.get("message_type"),
+                meta.get("cell_status"),
+            )
             self.mysql_cur.execute(query, arg)
             self.mysql_con.commit()
 
     def header(self):
-        print(f"{'Nb IMSI':7s} ; {'TMSI-1':10s} ; {'TMSI-2':10s} ; {'IMSI':17s} ; {'country':16s} ; {'brand':14s} ; {'operator':21s} ; {'MCC':4s} ; {'MNC':5s} ; {'LAC':6s} ; {'CellId':6s} ; {'Timestamp':s}")
+        if self.output_format == "json":
+            return
+        if self.output_format == "csv":
+            csv.writer(sys.stdout).writerow([
+                "Nb IMSI",
+                "TMSI-1",
+                "TMSI-2",
+                "IMSI",
+                "country",
+                "brand",
+                "operator",
+                "MCC",
+                "MNC",
+                "LAC",
+                "CellId",
+                "ARFCN",
+                "TS",
+                "SS",
+                "dBm",
+                "SNR",
+                "Frame",
+                "ChannelType",
+                "MsgType",
+                "CellState",
+                "Timestamp",
+            ])
+            return
+        columns = [
+            f"{'Nb IMSI':7s}",
+            f"{'TMSI-1':10s}",
+            f"{'TMSI-2':10s}",
+            f"{'IMSI':17s}",
+            f"{'country':16s}",
+            f"{'brand':14s}",
+            f"{'operator':21s}",
+            f"{'MCC':4s}",
+            f"{'MNC':5s}",
+            f"{'LAC':6s}",
+            f"{'CellId':6s}",
+        ]
+        if self.show_meta:
+            columns.extend([
+                f"{'ARFCN':5s}",
+                f"{'TS':2s}",
+                f"{'SS':3s}",
+                f"{'dBm':6s}",
+                f"{'SNR':5s}",
+                f"{'Frame':10s}",
+                f"{'MsgType':14s}",
+                f"{'CellState':10s}",
+            ])
+        columns.append("Timestamp")
+        print(" ; ".join(columns))
 
-    def register_imsi(self, arfcn, imsi1="", imsi2="", tmsi1="", tmsi2="", p=""):
+    def register_imsi(self, arfcn, imsi1="", imsi2="", tmsi1="", tmsi2="", p="", meta=None):
         do_print = False
         n = ''
         tmsi1 = self.str_tmsi(tmsi1)
@@ -277,9 +619,9 @@ class tracker:
 
         if do_print:
             if imsi1:
-                self.pfields(str(n), tmsi1, tmsi2, imsi1, str(self.mcc), str(self.mnc), str(self.lac), str(self.cell), p)
+                self.pfields(str(n), tmsi1, tmsi2, imsi1, arfcn, p, meta=meta)
             if imsi2:
-                self.pfields(str(n), tmsi1, tmsi2, imsi2, str(self.mcc), str(self.mnc), str(self.lac), str(self.cell), p)
+                self.pfields(str(n), tmsi1, tmsi2, imsi2, arfcn, p, meta=meta)
 
         if not imsi1 and not imsi2:
             # Register IMSI as seen if a TMSI believed to
@@ -295,7 +637,7 @@ class tracker:
                     do_print = True
                     self.tmsis[tmsi2] = ""
                 if do_print:
-                    self.pfields(str(n), tmsi1, tmsi2, None, str(self.mcc), str(self.mnc), str(self.lac), str(self.cell), p)
+                    self.pfields(str(n), tmsi1, tmsi2, None, arfcn, p, meta=meta)
 
     def imsi_seen(self, imsi, arfcn):
         now = datetime.datetime.utcnow().replace(microsecond=0)
@@ -408,24 +750,45 @@ def find_cell(gsm, udpdata, t=None):
     if gsm.sub_type == 0x01:  # Channel Type == BCCH (0)
         p = bytearray(udpdata)
         if p[0x12] == 0x1b:  # (0x12 + 0x2a = 0x3c) Message Type: System Information Type 3
-            # FIXME
-            m = hex(p[0x15])
-            if len(m) < 4:
-                mcc = m[2] + '0'
-            else:
-                mcc = m[3] + m[2]
-            mcc += str(p[0x16] & 0x0f)
-
-            # FIXME not works with mnc like 005 or 490
-            m = hex(p[0x17])
-            if len(m) < 4:
-                mnc = m[2] + '0'
-            else:
-                mnc = m[3] + m[2]
-
+            mcc, mnc = decode_plmn(p[0x15], p[0x16], p[0x17])
             lac = p[0x18] * 256 + p[0x19]
             cell = p[0x13] * 256 + p[0x14]
-            t.current_cell(mcc, mnc, lac, cell)
+            t.current_cell(mcc, mnc, lac, cell, arfcn=gsm.arfcn)
+
+
+def decode_plmn(octet1, octet2, octet3):
+    mcc = f"{octet1 & 0x0f}{(octet1 >> 4) & 0x0f}{octet2 & 0x0f}"
+    mnc_digit3 = (octet2 >> 4) & 0x0f
+    mnc = f"{octet3 & 0x0f}{(octet3 >> 4) & 0x0f}"
+    if mnc_digit3 != 0x0f:
+        mnc += str(mnc_digit3)
+    return mcc, mnc
+
+
+def message_type_name(message_type):
+    mapping = {
+        0x1B: "SI3",
+        0x21: "PagingReq1",
+        0x22: "PagingReq2",
+        0x3F: "ImmAssign",
+    }
+    return mapping.get(message_type, f"0x{message_type:02x}")
+
+
+def packet_meta(gsm, message_type):
+    signal_dbm = gsm.signal_dbm
+    if signal_dbm > 127:
+        signal_dbm -= 256
+    return {
+        "arfcn": gsm.arfcn,
+        "timeslot": gsm.timeslot,
+        "sub_slot": gsm.sub_slot,
+        "signal_dbm": signal_dbm,
+        "snr_db": gsm.snr_db,
+        "frame_number": gsm.frame_number,
+        "channel_type": gsm.sub_type,
+        "message_type": message_type_name(message_type),
+    }
 
 
 def find_imsi(udpdata, t=None):
@@ -443,6 +806,7 @@ def find_imsi(udpdata, t=None):
         find_cell(gsm, udpdata, t=t)
     else:  # Channel Type != BCCH (0)
         p = bytearray(udpdata)
+        meta = packet_meta(gsm, p[0x12])
         tmsi1 = ""
         tmsi2 = ""
         imsi1 = ""
@@ -491,7 +855,7 @@ def find_imsi(udpdata, t=None):
                     """
                     tmsi1 = p[0x20:][:4]
 
-                t.register_imsi(gsm.arfcn, imsi1, imsi2, tmsi1, tmsi2, p)
+                t.register_imsi(gsm.arfcn, imsi1, imsi2, tmsi1, tmsi2, p, meta=meta)
 
             elif p[0x1B] == 0x08 and (p[0x1C] & 0x1) == 0x1:  # Channel 2: TCH/F (Full rate) (2)
                 # Mobile Identity 2 Type: IMSI (1)
@@ -508,7 +872,7 @@ def find_imsi(udpdata, t=None):
                 """
                 tmsi1 = p[0x16:][:4]
                 imsi2 = p[0x1C:][:8]
-                t.register_imsi(gsm.arfcn, imsi1, imsi2, tmsi1, tmsi2, p)
+                t.register_imsi(gsm.arfcn, imsi1, imsi2, tmsi1, tmsi2, p, meta=meta)
 
             elif p[0x14] == 0x05 and (p[0x15] & 0x07) == 4:  # Mobile Identity - Mobile Identity 1 - TMSI/P-TMSI
                 """
@@ -528,7 +892,7 @@ def find_imsi(udpdata, t=None):
                 else:
                     tmsi2 = ""
 
-                t.register_imsi(gsm.arfcn, imsi1, imsi2, tmsi1, tmsi2, p)
+                t.register_imsi(gsm.arfcn, imsi1, imsi2, tmsi1, tmsi2, p, meta=meta)
 
         elif p[0x12] == 0x22:  # Message Type: Paging Request Type 2
             if p[0x1D] == 0x08 and (p[0x1E] & 0x1) == 0x1:  # Mobile Identity 3 Type: IMSI (1)
@@ -547,7 +911,7 @@ def find_imsi(udpdata, t=None):
                 tmsi1 = p[0x14:][:4]
                 tmsi2 = p[0x18:][:4]
                 imsi2 = p[0x1E:][:8]
-                t.register_imsi(gsm.arfcn, imsi1, imsi2, tmsi1, tmsi2, p)
+                t.register_imsi(gsm.arfcn, imsi1, imsi2, tmsi1, tmsi2, p, meta=meta)
 
 
 def udpserver(port, prn):
@@ -565,6 +929,21 @@ def find_imsi_from_pkt(p):
     find_imsi(udpdata)
 
 
+def encode_imsi_filter(imsi_value):
+    if not imsi_value:
+        return ""
+
+    encoded_imsi = ""
+    imsi = "9" + imsi_value.replace(" ", "")
+    imsi_to_track_len = len(imsi)
+    if imsi_to_track_len % 2 == 0 and imsi_to_track_len > 0 and imsi_to_track_len < 17:
+        for i in range(0, imsi_to_track_len - 1, 2):
+            encoded_imsi += chr(int(imsi[i + 1]) * 16 + int(imsi[i]))
+        return encoded_imsi
+
+    raise ValueError("Wrong size for the IMSI to track")
+
+
 if __name__ == "__main__":
     imsitracker = tracker()
     parser = OptionParser(usage="%prog: [options]")
@@ -574,9 +953,18 @@ if __name__ == "__main__":
     parser.add_option("-p", "--port", dest="port", default="4729", type="int", help="Port (default : 4729)")
     parser.add_option("-s", "--sniff", action="store_true", dest="sniff", help="sniff on interface instead of listening on port (require root/suid access)")
     parser.add_option("-w", "--sqlite", dest="sqlite", default=None, type="string", help="Save observed IMSI values to specified SQLite file")
-    parser.add_option("-t", "--txt", dest="txt", default=None, type="string", help="Save observed IMSI values to specified TXT file")
+    parser.add_option("-t", "--txt", dest="txt", default=None, type="string", help="Save observed IMSI values to specified CSV file")
     parser.add_option("-z", "--mysql", action="store_true", dest="mysql", help="Save observed IMSI values to specified MYSQL DB (copy .env.dist to .env and edit it)")
+    parser.add_option("-f", "--format", dest="output_format", default="table", type="string", help="Output format: table, csv, or json (default: table)")
+    parser.add_option("--show-meta", action="store_true", dest="show_meta", help="Show packet metadata columns such as ARFCN, timeslot, signal level, SNR, frame number, and cell state")
     (options, args) = parser.parse_args()
+
+    if options.output_format not in ("table", "csv", "json"):
+        print("Wrong value for --format. Valid values: table, csv, json")
+        sys.exit(1)
+
+    if options.output_format == "csv":
+        options.show_meta = True
 
     if options.sqlite:
         imsitracker.sqlite_file(options.sqlite)
@@ -587,16 +975,13 @@ if __name__ == "__main__":
     if options.mysql:
         imsitracker.mysql_file()
 
+    imsitracker.set_output_format(options.output_format, show_meta=options.show_meta)
     imsitracker.show_all_tmsi = options.show_all_tmsi
     imsi_to_track = ""
     if options.imsi:
-        imsi = "9" + options.imsi.replace(" ", "")
-        imsi_to_track_len = len(imsi)
-        if imsi_to_track_len % 2 == 0 and imsi_to_track_len > 0 and imsi_to_track_len < 17:
-            for i in range(0, imsi_to_track_len - 1, 2):
-                imsi_to_track += chr(int(imsi[i + 1]) * 16 + int(imsi[i]))
-            imsi_to_track_len = len(imsi_to_track)
-        else:
+        try:
+            imsi_to_track = encode_imsi_filter(options.imsi)
+        except ValueError:
             print("Wrong size for the IMSI to track!")
             print("Valid sizes :")
             print("123456789101112")
