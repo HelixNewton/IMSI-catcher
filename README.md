@@ -230,4 +230,7 @@ Mobile Network Code : https://en.wikipedia.org/wiki/Mobile_Network_Code
 Scapy : http://secdev.org/projects/scapy/doc/usage.html  
 IMSI : https://fr.wikipedia.org/wiki/IMSI  
 Realtek RTL2832U : https://osmocom.org/projects/sdr/wiki/rtl-sdr and http://doc.ubuntu-fr.org/rtl2832u and http://doc.ubuntu-fr.org/rtl-sdr  
+<<<<<<< HEAD
 
+=======
+>>>>>>> 039bd87e76e5e985cd3cbe906ca8eb87757b9c2d
