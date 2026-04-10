@@ -230,7 +230,3 @@ Scapy : http://secdev.org/projects/scapy/doc/usage.html
 IMSI : https://fr.wikipedia.org/wiki/IMSI  
 Realtek RTL2832U : https://osmocom.org/projects/sdr/wiki/rtl-sdr and http://doc.ubuntu-fr.org/rtl2832u and http://doc.ubuntu-fr.org/rtl-sdr  
 
-# Donate
-
-To support my work, a tipee would be nice ;-)  
-https://liberapay.com/Oros/  
