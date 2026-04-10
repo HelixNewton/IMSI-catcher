@@ -929,9 +929,13 @@ class CaptureManager:
         }
         self.last_log = "Ready."
         self.last_error = ""
+        self.last_start_error = ""
 
     def _record_callback(self, cpt, tmsi1, tmsi2, imsi, imsicountry, imsibrand, imsioperator, mcc, mnc, lac, cell, now, packet=None, meta=None):
-        record = self.tracker.build_record(
+        tracker = self.tracker
+        if tracker is None:
+            return
+        record = tracker.build_record(
             cpt, tmsi1, tmsi2, imsi, imsicountry, imsibrand, imsioperator, mcc, mnc, lac, cell, now, meta=meta
         )
         with self.lock:
@@ -960,19 +964,25 @@ class CaptureManager:
         return tracker
 
     def _udp_loop(self, port):
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.bind(("localhost", port))
-        self.sock.settimeout(1.0)
         try:
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.sock.bind(("localhost", port))
+            self.sock.settimeout(1.0)
             while not self.stop_event.is_set():
                 try:
                     udpdata, _ = self.sock.recvfrom(4096)
                 except socket.timeout:
                     continue
                 simple_imsi_catcher.find_imsi(udpdata, t=self.tracker)
+        except Exception as exc:
+            with self.lock:
+                self.last_error = f"UDP capture failed: {exc}"
+                self.last_log = self.last_error
+                self.running = False
         finally:
             try:
-                self.sock.close()
+                if self.sock:
+                    self.sock.close()
             except OSError:
                 pass
             self.sock = None
@@ -1014,18 +1024,35 @@ class CaptureManager:
             self.config = merged
             self.last_log = f"Starting {merged['mode']} capture on {merged['iface']}:{merged['port']}"
             self.last_error = ""
+            self.last_start_error = ""
 
             if merged["mode"] == "sniff":
-                self._start_sniffer(merged)
+                try:
+                    self._start_sniffer(merged)
+                except Exception:
+                    self.tracker.close()
+                    self.tracker = None
+                    raise
                 self.thread = None
+                self.running = True
             else:
+                bind_probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                try:
+                    bind_probe.bind(("localhost", merged["port"]))
+                except OSError as exc:
+                    bind_probe.close()
+                    self.tracker.close()
+                    self.tracker = None
+                    raise RuntimeError(f"Unable to bind UDP listener on port {merged['port']}: {exc}")
+                bind_probe.close()
                 self.thread = threading.Thread(target=self._udp_loop, args=(merged["port"],), daemon=True)
                 self.thread.start()
-
-            self.running = True
+                self.running = True
 
     def stop(self):
         tracker_to_close = None
+        sniffer_to_stop = None
+        thread = None
         with self.lock:
             if not self.running:
                 return
@@ -1035,21 +1062,24 @@ class CaptureManager:
                     self.sock.close()
                 except OSError:
                     pass
-            if self.sniffer:
-                try:
-                    self.sniffer.stop()
-                except Exception:
-                    pass
-                self.sniffer = None
+            sniffer_to_stop = self.sniffer
+            self.sniffer = None
             thread = self.thread
             self.thread = None
             tracker_to_close = self.tracker
-            self.tracker = None
             self.running = False
             self.last_log = "Capture stopped."
 
+        if sniffer_to_stop:
+            try:
+                sniffer_to_stop.stop()
+            except Exception:
+                pass
         if thread:
             thread.join(timeout=2.0)
+        with self.lock:
+            if self.tracker is tracker_to_close:
+                self.tracker = None
         if tracker_to_close:
             tracker_to_close.close()
 
@@ -1057,6 +1087,11 @@ class CaptureManager:
         with self.lock:
             self.records.clear()
             self.total_events = 0
+            if self.tracker:
+                self.tracker.imsistate.clear()
+                self.tracker.imsis.clear()
+                self.tracker.tmsis.clear()
+                self.tracker.nb_IMSI = 0
             self.last_log = "Session memory cleared."
             self.last_error = ""
 
@@ -1235,7 +1270,14 @@ class RequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
-        limit = int(params.get("limit", ["250"])[0])
+        try:
+            limit = int(params.get("limit", ["250"])[0])
+        except ValueError:
+            self._send(HTTPStatus.BAD_REQUEST, "Invalid limit value", content_type="text/plain; charset=utf-8")
+            return
+        if limit < 1:
+            self._send(HTTPStatus.BAD_REQUEST, "limit must be >= 1", content_type="text/plain; charset=utf-8")
+            return
 
         if parsed.path == "/":
             self._send(HTTPStatus.OK, UI_HTML, content_type="text/html; charset=utf-8")
