@@ -23,9 +23,10 @@ This program shows you IMSI numbers of cellphones around you.
 import ctypes
 import csv
 import json
-from optparse import OptionParser
+import argparse
 import datetime
 import io
+import os
 import sys
 import socket
 
@@ -71,6 +72,7 @@ class tracker:
         self.show_meta = False
         self.csv_writer = None
         self.csv_file = None
+        self.stdout_csv_writer = csv.writer(sys.stdout)
         self.cell_arfcn = None
         self.cell_last_seen = None
         self.load_mcc_codes()
@@ -146,16 +148,12 @@ class tracker:
             operator = f"Unknown MNC {mnc}"
             new_imsi = f"{mcc} {mnc} {new_imsi[6:]}"
 
-        try:
-            return new_imsi, country, brand, operator
-        except Exception:
-            # m = ""
-            print("Error", packet, new_imsi, country, brand, operator)
-        return "", "", "", ""
+        return new_imsi, country, brand, operator
 
     def load_mcc_codes(self):
         # mcc codes form https://en.wikipedia.org/wiki/Mobile_Network_Code
-        with io.open('mcc-mnc/mcc_codes.json', 'r', encoding='utf8') as file:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'mcc-mnc', 'mcc_codes.json')
+        with io.open(path, 'r', encoding='utf8') as file:
             self.mcc_codes = json.load(file)
 
     def current_cell(self, mcc, mnc, lac, cell, arfcn=None):
@@ -176,7 +174,7 @@ class tracker:
         self.brand = brand
         self.operator = operator
         self.cell_arfcn = str(arfcn) if arfcn is not None else None
-        self.cell_last_seen = datetime.datetime.utcnow().replace(microsecond=0)
+        self.cell_last_seen = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
 
     def cell_context_for_event(self, arfcn):
         empty_context = {
@@ -362,7 +360,6 @@ class tracker:
 
     def output_csv(self, cpt, tmsi1, tmsi2, imsi, imsicountry, imsibrand, imsioperator, mcc, mnc, lac, cell, now, packet=None, meta=None):
         record = self.build_record(cpt, tmsi1, tmsi2, imsi, imsicountry, imsibrand, imsioperator, mcc, mnc, lac, cell, now, meta=meta)
-        writer = csv.writer(sys.stdout)
         columns = [
             record["count"],
             record["tmsi1"],
@@ -386,7 +383,7 @@ class tracker:
             record["cell_status"],
             record["timestamp"],
         ]
-        writer.writerow(columns)
+        self.stdout_csv_writer.writerow(columns)
 
     def pfields(self, cpt, tmsi1, tmsi2, imsi, arfcn, packet=None, meta=None):
         imsicountry = ""
@@ -479,7 +476,6 @@ class tracker:
                )
             )
             self.sqlite_con.commit()
-            pass
 
         if self.mysql_cur:
             print("saving data to db...")
@@ -584,11 +580,11 @@ class tracker:
                 self.nb_IMSI += 1
                 n = self.nb_IMSI
             if self.tmsis and tmsi1 and (tmsi1 not in self.tmsis or self.tmsis[tmsi1] != imsi1):
-                # new TMSI to an ISMI
+                # new TMSI to an IMSI
                 do_print = True
                 self.tmsis[tmsi1] = imsi1
             if self.tmsis and tmsi2 and (tmsi2 not in self.tmsis or self.tmsis[tmsi2] != imsi1):
-                # new TMSI to an ISMI
+                # new TMSI to an IMSI
                 do_print = True
                 self.tmsis[tmsi2] = imsi1
 
@@ -600,11 +596,11 @@ class tracker:
                 self.nb_IMSI += 1
                 n = self.nb_IMSI
             if self.tmsis and tmsi1 and (tmsi1 not in self.tmsis or self.tmsis[tmsi1] != imsi2):
-                # new TMSI to an ISMI
+                # new TMSI to an IMSI
                 do_print = True
                 self.tmsis[tmsi1] = imsi2
             if self.tmsis and tmsi2 and (tmsi2 not in self.tmsis or self.tmsis[tmsi2] != imsi2):
-                # new TMSI to an ISMI
+                # new TMSI to an IMSI
                 do_print = True
                 self.tmsis[tmsi2] = imsi2
 
@@ -640,7 +636,7 @@ class tracker:
                     self.pfields(str(n), tmsi1, tmsi2, None, arfcn, p, meta=meta)
 
     def imsi_seen(self, imsi, arfcn):
-        now = datetime.datetime.utcnow().replace(microsecond=0)
+        now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
         imsi, mcc, mnc = self.decode_imsi(imsi)
         if imsi in self.imsistate:
             self.imsistate[imsi]["lastseen"] = now
@@ -654,17 +650,12 @@ class tracker:
         self.imsi_purge_old()
 
     def imsi_purge_old(self):
-        now = datetime.datetime.utcnow().replace(microsecond=0)
+        now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
         maxage = datetime.timedelta(minutes=self.purgeTimer)
         limit = now - maxage
         remove = [imsi for imsi in self.imsistate if limit > self.imsistate[imsi]["lastseen"]]
         for k in remove:
             del self.imsistate[k]
-        # keys = self.imsistate.keys()
-        # for imsi in keys:
-        #   if limit > self.imsistate[imsi]["lastseen"]:
-        #       del self.imsistate[imsi]
-        #       keys = self.imsistate.keys()
 
 
 class gsmtap_hdr(ctypes.BigEndianStructure):
@@ -694,17 +685,7 @@ class gsmtap_hdr(ctypes.BigEndianStructure):
         )
 
 
-# return mcc mnc, lac, cell, country, brand, operator
 def find_cell(gsm, udpdata, t=None):
-    # find_cell() update all following variables
-    global mcc
-    global mnc
-    global lac
-    global cell
-    global country
-    global brand
-    global operator
-
     """
     Dump of a packet from wireshark
 
@@ -925,43 +906,40 @@ def udpserver(port, prn):
 
 
 def find_imsi_from_pkt(p):
+    from scapy.all import UDP
     udpdata = bytes(p[UDP].payload)
     find_imsi(udpdata)
 
 
 def encode_imsi_filter(imsi_value):
     if not imsi_value:
-        return ""
+        return b""
 
-    encoded_imsi = ""
+    encoded = bytearray()
     imsi = "9" + imsi_value.replace(" ", "")
     imsi_to_track_len = len(imsi)
     if imsi_to_track_len % 2 == 0 and imsi_to_track_len > 0 and imsi_to_track_len < 17:
         for i in range(0, imsi_to_track_len - 1, 2):
-            encoded_imsi += chr(int(imsi[i + 1]) * 16 + int(imsi[i]))
-        return encoded_imsi
+            encoded.append(int(imsi[i + 1]) * 16 + int(imsi[i]))
+        return bytes(encoded)
 
     raise ValueError("Wrong size for the IMSI to track")
 
 
 if __name__ == "__main__":
     imsitracker = tracker()
-    parser = OptionParser(usage="%prog: [options]")
-    parser.add_option("-a", "--alltmsi", action="store_true", dest="show_all_tmsi", help="Show TMSI who haven't got IMSI (default  : false)")
-    parser.add_option("-i", "--iface", dest="iface", default="lo", help="Interface (default : lo)")
-    parser.add_option("-m", "--imsi", dest="imsi", default="", type="string", help='IMSI to track (default : None, Example: 123456789101112 or "123 45 6789101112")')
-    parser.add_option("-p", "--port", dest="port", default="4729", type="int", help="Port (default : 4729)")
-    parser.add_option("-s", "--sniff", action="store_true", dest="sniff", help="sniff on interface instead of listening on port (require root/suid access)")
-    parser.add_option("-w", "--sqlite", dest="sqlite", default=None, type="string", help="Save observed IMSI values to specified SQLite file")
-    parser.add_option("-t", "--txt", dest="txt", default=None, type="string", help="Save observed IMSI values to specified CSV file")
-    parser.add_option("-z", "--mysql", action="store_true", dest="mysql", help="Save observed IMSI values to specified MYSQL DB (copy .env.dist to .env and edit it)")
-    parser.add_option("-f", "--format", dest="output_format", default="table", type="string", help="Output format: table, csv, or json (default: table)")
-    parser.add_option("--show-meta", action="store_true", dest="show_meta", help="Show packet metadata columns such as ARFCN, timeslot, signal level, SNR, frame number, and cell state")
-    (options, args) = parser.parse_args()
-
-    if options.output_format not in ("table", "csv", "json"):
-        print("Wrong value for --format. Valid values: table, csv, json")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="Show IMSI numbers of cellphones around you.")
+    parser.add_argument("-a", "--alltmsi", action="store_true", dest="show_all_tmsi", help="Show TMSI without linked IMSI (default: false)")
+    parser.add_argument("-i", "--iface", default="lo", help="Interface (default: lo)")
+    parser.add_argument("-m", "--imsi", default="", help='IMSI prefix to track (e.g. 123456789101112 or "123 45 6789101112")')
+    parser.add_argument("-p", "--port", type=int, default=4729, help="UDP port (default: 4729)")
+    parser.add_argument("-s", "--sniff", action="store_true", help="Sniff on interface instead of listening on port (requires root)")
+    parser.add_argument("-w", "--sqlite", default=None, help="Save observations to SQLite file")
+    parser.add_argument("-t", "--txt", default=None, help="Save observations to CSV file")
+    parser.add_argument("-z", "--mysql", action="store_true", help="Mirror to MySQL (copy .env.dist to .env and edit it)")
+    parser.add_argument("-f", "--format", dest="output_format", default="table", choices=["table", "csv", "json"], help="Output format (default: table)")
+    parser.add_argument("--show-meta", action="store_true", dest="show_meta", help="Show packet metadata columns: ARFCN, timeslot, signal, SNR, frame number, cell state")
+    options = parser.parse_args()
 
     if options.output_format == "csv":
         options.show_meta = True

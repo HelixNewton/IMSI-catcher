@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Author: Oros
 # 2016/10/06
@@ -96,31 +96,32 @@ def find_assignment(x):
 	http://niviuk.free.fr/gsm_band.php
 
 	"""
-	p=str(x)
-	if ord(p[0x36]) != 0x1: # Channel Type != BCCH (0)
-		if ord(p[0x3c]) == 0x3f: # Message Type: Immediate Assignment
-			if ord(p[0x3d]) >> 4 == 0: # 0000 .... = Dedicated mode or TBF: This message assigns a dedicated mode resource (0)
-				sdcch=ord(p[0x3e]) >> 3 # 0100 0... = SDCCH/8 + SACCH/C8 or CBCH (SDCCH/8): 8
-				subchannel=ord(p[0x3e])
-				timeslot=ord(p[0x3e]) & 0x07 # .... .001 = Timeslot: 1
-				hopping_channel="yes" if (ord(p[0x3f]) >> 4) & 1 == 1 else "no" # ...0 .... = Hopping Channel: No
-				arfcn=(ord(p[0x3f]) & 0x03)*256 + ord(p[0x40]) # .... ..11  1101 1111 = Single channel ARFCN: 991
+	p = bytes(x)
+	if p[0x36] != 0x1: # Channel Type != BCCH (0)
+		if p[0x3c] == 0x3f: # Message Type: Immediate Assignment
+			if p[0x3d] >> 4 == 0: # 0000 .... = Dedicated mode or TBF: This message assigns a dedicated mode resource (0)
+				sdcch = p[0x3e] >> 3 # 0100 0... = SDCCH/8 + SACCH/C8 or CBCH (SDCCH/8): 8
+				subchannel = p[0x3e]
+				timeslot = p[0x3e] & 0x07 # .... .001 = Timeslot: 1
+				hopping_channel = "yes" if (p[0x3f] >> 4) & 1 == 1 else "no" # ...0 .... = Hopping Channel: No
+				arfcn = (p[0x3f] & 0x03) * 256 + p[0x40] # .... ..11  1101 1111 = Single channel ARFCN: 991
 				print("{}\t; {}\t\t; {}\t\t; {}\t\t\t; {}".format(sdcch, subchannel, timeslot, hopping_channel, arfcn))
 			else:
 				# Dedicated mode or TBF: This message assigns an uplink TBF or is the second message of two in a two-message assignment of an uplink or downlink TBF (1)
-				sdcch="-"
-				subchannel="-"
-				timeslot=ord(p[0x3e]) & 0x07 # .... .001 = Timeslot: 1
-				hopping_channel="-"
-				arfcn=(ord(p[0x3f]) & 0x03)*256 + ord(p[0x40]) # .... ..11  1101 1111 = Single channel ARFCN: 991
+				sdcch = "-"
+				subchannel = "-"
+				timeslot = p[0x3e] & 0x07 # .... .001 = Timeslot: 1
+				hopping_channel = "-"
+				arfcn = (p[0x3f] & 0x03) * 256 + p[0x40] # .... ..11  1101 1111 = Single channel ARFCN: 991
 				print("{}\t; {}\t\t; {}\t\t; {}\t\t\t; {}".format(sdcch, subchannel, timeslot, hopping_channel, arfcn))
-				pass
 
-			
-parser = OptionParser(usage="%prog: [options]")
-parser.add_option("-i", "--iface", dest="iface", default="lo", help="Interface (default : lo)")
-parser.add_option("-p", "--port", dest="port", default="4729", type="int", help="Port (default : 4729)")
-(options, args) = parser.parse_args()
 
-print("SDCCH\t; Subchannel\t; Timeslot\t; HoppingChannel\t; ARFCN")
-sniff(iface=options.iface, filter="port {} and not icmp and udp".format(options.port), prn=find_assignment, store=0)
+
+if __name__ == "__main__":
+	parser = OptionParser(usage="%prog: [options]")
+	parser.add_option("-i", "--iface", dest="iface", default="lo", help="Interface (default : lo)")
+	parser.add_option("-p", "--port", dest="port", default="4729", type="int", help="Port (default : 4729)")
+	(options, args) = parser.parse_args()
+
+	print("SDCCH\t; Subchannel\t; Timeslot\t; HoppingChannel\t; ARFCN")
+	sniff(iface=options.iface, filter="port {} and not icmp and udp".format(options.port), prn=find_assignment, store=0)

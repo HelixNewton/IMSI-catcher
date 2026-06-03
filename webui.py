@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 import os
+import queue
 import socket
 import threading
 from collections import Counter, deque
@@ -548,6 +549,10 @@ UI_HTML = """<!doctype html>
               <label for="csv-path">CSV Capture File</label>
               <input id="csv-path" placeholder="Optional: capture.csv" />
             </div>
+            <div class="field" style="grid-column: 1 / -1;">
+              <label for="auth-token">Access Token</label>
+              <input id="auth-token" type="password" placeholder="Matches --token on server; leave blank if not set" />
+            </div>
             <div class="toggle">
               <label>Show Unresolved TMSI</label>
               <div class="toggle-row"><input id="alltmsi" type="checkbox"><span>Include TMSI values without linked IMSI</span></div>
@@ -567,6 +572,17 @@ UI_HTML = """<!doctype html>
         <section class="panel">
           <h2>Session Feed</h2>
           <div class="logline" id="session-log">Waiting for capture commands.</div>
+        </section>
+
+        <section class="panel">
+          <h2>Load Capture</h2>
+          <div class="field">
+            <label for="load-sqlite-path">SQLite File Path</label>
+            <input id="load-sqlite-path" placeholder="e.g. capture.sqlite" />
+          </div>
+          <div class="actions" style="margin-top: 12px;">
+            <button class="secondary" id="load-sqlite-btn">Load</button>
+          </div>
         </section>
       </div>
 
@@ -686,9 +702,12 @@ UI_HTML = """<!doctype html>
     }
 
     async function api(path, options = {}) {
+      const token = (byId("auth-token") || { value: "" }).value.trim();
+      const baseHeaders = { "Content-Type": "application/json" };
+      if (token) baseHeaders["Authorization"] = `Bearer ${token}`;
       const response = await fetch(path, {
-        headers: { "Content-Type": "application/json" },
         ...options,
+        headers: { ...baseHeaders, ...(options.headers || {}) },
       });
       if (!response.ok) {
         const text = await response.text();
@@ -884,6 +903,18 @@ UI_HTML = """<!doctype html>
       byId(id).addEventListener(id === "search" ? "input" : "change", refresh);
     });
 
+    byId("load-sqlite-btn").addEventListener("click", async () => {
+      const path = byId("load-sqlite-path").value.trim();
+      if (!path) { setLog("Enter a SQLite file path to load."); return; }
+      try {
+        await api("/api/load-sqlite", { method: "POST", body: JSON.stringify({ path }) });
+        setLog(`Loaded ${path}.`);
+        refresh();
+      } catch (error) {
+        setLog(error.message);
+      }
+    });
+
     byId("export-json").addEventListener("click", () => {
       window.open(`/api/export.json?${activeFilters()}`, "_blank");
     });
@@ -901,8 +932,35 @@ UI_HTML = """<!doctype html>
       });
     });
 
-    refresh();
-    setInterval(refresh, 1500);
+    let _sse = null;
+    let _refreshPending = false;
+
+    function connectSSE() {
+      if (_sse) { _sse.close(); _sse = null; }
+      const token = (byId("auth-token") || { value: "" }).value.trim();
+      const params = new URLSearchParams({ limit: String(state.limit) });
+      if (token) params.set("token", token);
+      _sse = new EventSource(`/api/events?${params}`);
+      _sse.addEventListener("init", (e) => {
+        const payload = JSON.parse(e.data);
+        renderState(payload);
+        renderEvents(payload.events);
+        renderDevices(payload.devices || []);
+        renderSummaries(payload.summaries || {});
+      });
+      _sse.addEventListener("record", () => {
+        if (!_refreshPending) {
+          _refreshPending = true;
+          setTimeout(() => { refresh(); _refreshPending = false; }, 120);
+        }
+      });
+      _sse.addEventListener("clear", () => { refresh(); });
+    }
+
+    byId("auth-token").addEventListener("change", connectSSE);
+
+    connectSSE();
+    setInterval(refresh, 10000);
   </script>
 </body>
 </html>
@@ -929,7 +987,7 @@ class CaptureManager:
         }
         self.last_log = "Ready."
         self.last_error = ""
-        self.last_start_error = ""
+        self._sse_queues = []
 
     def _record_callback(self, cpt, tmsi1, tmsi2, imsi, imsicountry, imsibrand, imsioperator, mcc, mnc, lac, cell, now, packet=None, meta=None):
         tracker = self.tracker
@@ -943,6 +1001,12 @@ class CaptureManager:
             self.records.appendleft(record)
             self.last_log = f"{record['timestamp']} {record['message_type']} {record['imsi'] or record['tmsi1'] or record['tmsi2']}"
             self.last_error = ""
+            sse_qs = list(self._sse_queues)
+        for q in sse_qs:
+            try:
+                q.put_nowait(record)
+            except Exception:
+                pass
 
     def _setup_tracker(self, config):
         tracker = simple_imsi_catcher.tracker()
@@ -1024,7 +1088,6 @@ class CaptureManager:
             self.config = merged
             self.last_log = f"Starting {merged['mode']} capture on {merged['iface']}:{merged['port']}"
             self.last_error = ""
-            self.last_start_error = ""
 
             if merged["mode"] == "sniff":
                 try:
@@ -1094,6 +1157,69 @@ class CaptureManager:
                 self.tracker.nb_IMSI = 0
             self.last_log = "Session memory cleared."
             self.last_error = ""
+            sse_qs = list(self._sse_queues)
+        for q in sse_qs:
+            try:
+                q.put_nowait(None)
+            except Exception:
+                pass
+
+    def subscribe_sse(self):
+        q = queue.SimpleQueue()
+        with self.lock:
+            self._sse_queues.append(q)
+        return q
+
+    def unsubscribe_sse(self, q):
+        with self.lock:
+            try:
+                self._sse_queues.remove(q)
+            except ValueError:
+                pass
+
+    def load_sqlite(self, path):
+        import sqlite3
+        con = sqlite3.connect(path)
+        con.row_factory = sqlite3.Row
+        with con:
+            rows = con.execute("SELECT * FROM observations ORDER BY stamp ASC").fetchall()
+        con.close()
+        new_records = deque(maxlen=5000)
+        for i, row in enumerate(rows, 1):
+            new_records.appendleft({
+                "count": str(i),
+                "tmsi1": row["tmsi1"] or "",
+                "tmsi2": row["tmsi2"] or "",
+                "imsi": row["imsi"] or "",
+                "imsicountry": row["imsicountry"] or "",
+                "imsibrand": row["imsibrand"] or "",
+                "imsioperator": row["imsioperator"] or "",
+                "mcc": str(row["mcc"] or ""),
+                "mnc": str(row["mnc"] or ""),
+                "lac": str(row["lac"] or ""),
+                "cell": str(row["cell"] or ""),
+                "timestamp": str(row["stamp"] or ""),
+                "arfcn": str(row["arfcn"] or ""),
+                "timeslot": str(row["timeslot"] or ""),
+                "sub_slot": str(row["sub_slot"] or ""),
+                "signal_dbm": str(row["signal_dbm"] or ""),
+                "snr_db": str(row["snr_db"] or ""),
+                "frame_number": str(row["frame_number"] or ""),
+                "channel_type": str(row["channel_type"] or ""),
+                "message_type": row["message_type"] or "",
+                "cell_status": row["cell_status"] or "",
+            })
+        with self.lock:
+            self.records = new_records
+            self.total_events = len(new_records)
+            self.last_log = f"Loaded {len(rows)} records from {os.path.basename(path)}."
+            self.last_error = ""
+            sse_qs = list(self._sse_queues)
+        for q in sse_qs:
+            try:
+                q.put_nowait(None)
+            except Exception:
+                pass
 
     def _normalize_filter_value(self, value):
         return (value or "").strip()
@@ -1174,8 +1300,7 @@ class CaptureManager:
                 device["signal_dbm"] = record.get("signal_dbm", "") or device["signal_dbm"]
                 device["message_type"] = record.get("message_type", "") or device["message_type"]
                 device["cell_status"] = record.get("cell_status", "") or device["cell_status"]
-        rows = sorted(devices.values(), key=lambda item: (-item["seen_count"], item["last_seen"]), reverse=False)
-        rows.sort(key=lambda item: item["seen_count"], reverse=True)
+        rows = sorted(devices.values(), key=lambda item: item["seen_count"], reverse=True)
         return rows[:limit]
 
     def _available_filters(self):
@@ -1234,9 +1359,58 @@ manager = CaptureManager()
 
 class RequestHandler(BaseHTTPRequestHandler):
     server_version = "IMSIWebUI/1.0"
+    auth_token = None  # set by main() when --token is provided
 
     def log_message(self, format, *args):
         return
+
+    def _check_auth(self):
+        if not self.__class__.auth_token:
+            return True
+        token = self.__class__.auth_token
+        if self.headers.get("Authorization", "") == f"Bearer {token}":
+            return True
+        params = parse_qs(urlparse(self.path).query)
+        if params.get("token", [""])[0] == token:
+            return True
+        return False
+
+    def _write_sse(self, event_type, data):
+        self.wfile.write(f"event: {event_type}\ndata: {data}\n\n".encode("utf-8"))
+        self.wfile.flush()
+
+    def _write_sse_comment(self, comment):
+        self.wfile.write(f": {comment}\n\n".encode("utf-8"))
+        self.wfile.flush()
+
+    def _handle_sse(self, params):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        try:
+            limit = int(params.get("limit", ["250"])[0])
+        except (ValueError, TypeError):
+            limit = 250
+        filters = self._filters_from_query(params)
+        q = manager.subscribe_sse()
+        try:
+            self._write_sse("init", json.dumps(manager.snapshot(limit=limit, filters=filters), ensure_ascii=False))
+            while True:
+                try:
+                    item = q.get(timeout=15.0)
+                    if item is None:
+                        self._write_sse("clear", "{}")
+                    else:
+                        self._write_sse("record", json.dumps(item, ensure_ascii=False))
+                except queue.Empty:
+                    self._write_sse_comment("heartbeat")
+        except OSError:
+            pass
+        finally:
+            manager.unsubscribe_sse(q)
 
     def _json_body(self):
         length = int(self.headers.get("Content-Length", "0"))
@@ -1281,6 +1455,14 @@ class RequestHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/":
             self._send(HTTPStatus.OK, UI_HTML, content_type="text/html; charset=utf-8")
+            return
+
+        if not self._check_auth():
+            self._send(HTTPStatus.UNAUTHORIZED, json.dumps({"error": "Unauthorized"}).encode("utf-8"))
+            return
+
+        if parsed.path == "/api/events":
+            self._handle_sse(params)
             return
 
         filters = self._filters_from_query(params)
@@ -1355,7 +1537,17 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         try:
+            if not self._check_auth():
+                self._send(HTTPStatus.UNAUTHORIZED, json.dumps({"error": "Unauthorized"}).encode("utf-8"))
+                return
             payload = self._json_body()
+            if self.path == "/api/load-sqlite":
+                path = payload.get("path", "").strip()
+                if not path:
+                    raise ValueError("path is required")
+                manager.load_sqlite(path)
+                self._send(HTTPStatus.OK, json.dumps(manager.snapshot()).encode("utf-8"))
+                return
             if self.path == "/api/start":
                 manager.start(payload)
                 self._send(HTTPStatus.OK, json.dumps(manager.snapshot()).encode("utf-8"))
@@ -1380,7 +1572,12 @@ def main():
     parser = argparse.ArgumentParser(description="Web UI for IMSI catcher")
     parser.add_argument("--host", default="127.0.0.1", help="HTTP bind address (default: 127.0.0.1)")
     parser.add_argument("--http-port", type=int, default=8080, help="HTTP port (default: 8080)")
+    parser.add_argument("--token", default="", help="Optional access token; required for all /api/* requests when set")
     args = parser.parse_args()
+
+    if args.token:
+        RequestHandler.auth_token = args.token
+        print(f"Auth token set — include 'Authorization: Bearer {args.token}' or ?token=... on API requests")
 
     server = ThreadingHTTPServer((args.host, args.http_port), RequestHandler)
     print(f"Web UI listening on http://{args.host}:{args.http_port}")
